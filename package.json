@@ -1,0 +1,11 @@
+{
+  "name": "e-skwela",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently \"npm --prefix server run dev\" \"npm --prefix client run dev\"",
+    "db:setup": "npm --prefix server run db:setup",
+    "build": "npm --prefix client run build",
+    "start": "npm --prefix server start"
+  },
+  "devDependencies": { "concurrently": "^9.0.1" }
+}
