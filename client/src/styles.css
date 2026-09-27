@@ -1,0 +1,505 @@
+import React, { useEffect, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import { QRCodeSVG } from 'qrcode.react';
+import './styles.css';
+
+const api = async (path, options = {}) => {
+  const response = await fetch(`/api${path}`, {
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    },
+    ...options
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || 'Request failed.');
+  }
+
+  return data;
+};
+
+function App() {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState('Dashboard');
+
+  useEffect(() => {
+    api('/auth/me')
+      .then((result) => setUser(result.user))
+      .catch(() => setUser(null))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return <div className="loading-screen">Loading E-Skwela...</div>;
+  }
+
+  if (!user) {
+    return <LoginForm onLogin={setUser} />;
+  }
+
+  const logout = async () => {
+    await api('/auth/logout', { method: 'POST' });
+    setUser(null);
+  };
+
+  return (
+    <div className="app-shell">
+      <aside className="sidebar">
+        <div className="brand-block">
+          <div className="brand-mark">E</div>
+          <div>
+            <div className="brand-title">E-Skwela</div>
+            <div className="brand-subtitle">Arellano University</div>
+          </div>
+        </div>
+
+        <nav className="nav-items">
+          {['Dashboard', 'Profile', 'Enrollment', 'Academic Records', 'Financials', 'Clearance', 'ID Services'].map((item) => (
+            <button
+              key={item}
+              className={page === item ? 'nav-btn active' : 'nav-btn'}
+              onClick={() => setPage(item)}
+            >
+              <span>◈</span>
+              {item}
+            </button>
+          ))}
+        </nav>
+
+        <button className="logout-btn" onClick={logout}>Logout</button>
+      </aside>
+
+      <main className="main-area">
+        <header className="topbar">
+          <div>
+            <div className="eyebrow">ARELLANO UNIVERSITY PORTAL</div>
+            <h1>{page}</h1>
+          </div>
+          <div className="user-pill">
+            <span className="status-dot" />
+            <div>
+              <strong>{user.email}</strong>
+              <small>{user.role}</small>
+            </div>
+          </div>
+        </header>
+
+        {user.role === 'STUDENT' && page === 'Dashboard' && <StudentDashboard user={user} />}
+        {user.role === 'STUDENT' && page === 'Profile' && <StudentProfile />}
+        {user.role === 'STUDENT' && page === 'Enrollment' && <EnrollmentPage />}
+        {user.role === 'STUDENT' && page === 'Academic Records' && <GradesPage />}
+        {user.role === 'STUDENT' && page === 'Financials' && <FinancialPage />}
+        {user.role === 'STUDENT' && page === 'Clearance' && <ClearancePage />}
+        {user.role === 'STUDENT' && page === 'ID Services' && <IDPage />}
+
+        {user.role !== 'STUDENT' && <AdminDashboard user={user} />}
+      </main>
+    </div>
+  );
+}
+
+function LoginForm({ onLogin }) {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    try {
+      const data = await api('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password })
+      });
+      onLogin(data.user);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  return (
+    <div className="login-screen">
+      <div className="login-card">
+        <div className="brand-block center-brand">
+          <div className="brand-mark">E</div>
+          <div>
+            <div className="brand-title">E-Skwela</div>
+            <div className="brand-subtitle">Arellano University Portal</div>
+          </div>
+        </div>
+
+        <h2>Welcome back</h2>
+        <p>Student, faculty, and admin access.</p>
+
+        {error && <div className="alert error">{error}</div>}
+
+        <form onSubmit={handleSubmit} className="login-form">
+          <label>
+            Email
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+          </label>
+          <label>
+            Password
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+          </label>
+          <button className="primary-btn" type="submit">Sign In</button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function StudentDashboard({ user }) {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    api('/student/dashboard').then(setData).catch(console.error);
+  }, []);
+
+  if (!data) return <div className="loading-screen">Loading dashboard...</div>;
+
+  const balance = Number(data.billing?.total_tuition || 0) - Number(data.billing?.paid || 0);
+
+  return (
+    <>
+      <section className="hero-panel">
+        <div>
+          <div className="eyebrow">Good day</div>
+          <h2>{data.student?.first_name || user.email} 👋</h2>
+          <p>Your academic overview and student services.</p>
+        </div>
+        <button className="primary-btn">Enroll Now</button>
+      </section>
+
+      <div className="cards-grid two-col">
+        <Card title="Digital ID">
+          <div className="id-card-mini">
+            <div className="avatar-circle">{(data.student?.first_name || 'S')[0]}{(data.student?.last_name || 'T')[0]}</div>
+            <div>
+              <h3>{data.student?.first_name} {data.student?.last_name}</h3>
+              <p>{data.student?.student_no}</p>
+              <small>{data.student?.program}</small>
+            </div>
+          </div>
+        </Card>
+
+        <Card title="My Ledger">
+          <div className="ledger-amount">₱{balance.toLocaleString()}</div>
+          <div className="meter">
+            <span style={{ width: '55%' }} />
+          </div>
+          <small>Paid ₱{Number(data.billing?.paid || 0).toLocaleString()} of ₱{Number(data.billing?.total_tuition || 0).toLocaleString()}</small>
+        </Card>
+      </div>
+
+      <div className="quick-actions">
+        <button>Enroll Now</button>
+        <button>Request Docs</button>
+        <button>Pay Tuition</button>
+        <button>View Grades</button>
+      </div>
+
+      <div className="two-panel-grid">
+        <Card title="Class Schedule">
+          {data.schedule?.length ? data.schedule.slice(0, 5).map((item, index) => (
+            <div key={index} className="list-row">
+              <div>
+                <strong>{item.code}</strong>
+                <small>{item.title}</small>
+              </div>
+              <div className="right-align">
+                <strong>{item.day_of_week}</strong>
+                <small>{item.room || 'TBA'}</small>
+              </div>
+            </div>
+          )) : <p className="muted">No schedule loaded.</p>}
+        </Card>
+
+        <Card title="Announcements & News">
+          {data.announcements?.map((item) => (
+            <div key={item.id} className="announcement-item">
+              <strong>{item.title}</strong>
+              <small>{item.category} • {new Date(item.published_at).toLocaleDateString()}</small>
+              <p>{item.description}</p>
+            </div>
+          ))}
+        </Card>
+      </div>
+    </>
+  );
+}
+
+function StudentProfile() {
+  const [profile, setProfile] = useState(null);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    api('/student/profile').then(setProfile).catch(console.error);
+  }, []);
+
+  if (!profile) return <div className="loading-screen">Loading profile...</div>;
+
+  const saveProfile = async () => {
+    await api('/student/profile', {
+      method: 'PATCH',
+      body: JSON.stringify({ phone: profile.phone, address: profile.address, photo_url: profile.photo_url })
+    });
+    setMessage('Profile updated successfully.');
+  };
+
+  return (
+    <Card title="Student Profile">
+      <div className="profile-grid">
+        <div><small>Student ID</small><strong>{profile.student_no}</strong></div>
+        <div><small>Email</small><strong>{profile.email}</strong></div>
+        <div><small>First name</small><strong>{profile.first_name}</strong></div>
+        <div><small>Last name</small><strong>{profile.last_name}</strong></div>
+        <div><small>Date of birth</small><strong>{profile.dob || '—'}</strong></div>
+        <div><small>Program</small><strong>{profile.program}</strong></div>
+        <div><small>Year level</small><strong>{profile.year_level}</strong></div>
+        <div><small>Section</small><strong>{profile.section || '—'}</strong></div>
+        <div className="wide-field">
+          <label>Contact Number</label>
+          <input value={profile.phone || ''} onChange={(e) => setProfile({ ...profile, phone: e.target.value })} />
+        </div>
+        <div className="wide-field">
+          <label>Address</label>
+          <textarea value={profile.address || ''} onChange={(e) => setProfile({ ...profile, address: e.target.value })} />
+        </div>
+      </div>
+      {message && <div className="alert success">{message}</div>}
+      <button className="primary-btn" onClick={saveProfile}>Save Permitted Changes</button>
+    </Card>
+  );
+}
+
+function EnrollmentPage() {
+  const [options, setOptions] = useState(null);
+  const [selected, setSelected] = useState([]);
+  const [termId, setTermId] = useState('');
+
+  useEffect(() => {
+    api('/student/enrollment-options').then((data) => {
+      setOptions(data);
+      if (data.terms[0]) setTermId(String(data.terms[0].id));
+    }).catch(console.error);
+  }, []);
+
+  if (!options) return <div className="loading-screen">Loading enrollment...</div>;
+
+  const toggleSelection = (scheduleId) => {
+    setSelected((current) =>
+      current.includes(scheduleId)
+        ? current.filter((id) => id !== scheduleId)
+        : [...current, scheduleId]
+    );
+  };
+
+  const submitEnrollment = async () => {
+    await api('/student/enrollment', {
+      method: 'POST',
+      body: JSON.stringify({ term_id: Number(termId), schedule_ids: selected })
+    });
+    alert('Enrollment submitted successfully.');
+  };
+
+  return (
+    <Card title="Enrollment">
+      <label>
+        Select Enrollment Term
+        <select value={termId} onChange={(e) => setTermId(e.target.value)}>
+          {options.terms.map((term) => (
+            <option key={term.id} value={term.id}>{term.name}</option>
+          ))}
+        </select>
+      </label>
+
+      <div className="subject-list">
+        {options.subjects.map((subject) => (
+          <label key={subject.schedule_id} className="subject-row">
+            <input type="checkbox" checked={selected.includes(subject.schedule_id)} onChange={() => toggleSelection(subject.schedule_id)} />
+            <div>
+              <strong>{subject.code} • {subject.title}</strong>
+              <small>{subject.units} units • {subject.day_of_week} {subject.start_time.slice(0,5)} - {subject.end_time.slice(0,5)} • {subject.room || 'TBA'}</small>
+            </div>
+          </label>
+        ))}
+      </div>
+
+      <button className="primary-btn" onClick={submitEnrollment} disabled={selected.length === 0}>Submit Enrollment</button>
+    </Card>
+  );
+}
+
+function GradesPage() {
+  const [grades, setGrades] = useState([]);
+
+  useEffect(() => {
+    api('/student/records').then(setGrades).catch(console.error);
+  }, []);
+
+  return (
+    <Card title="Academic Records">
+      {grades.length === 0 ? <p className="muted">No records available yet.</p> : grades.map((grade) => (
+        <div key={grade.id} className="list-row">
+          <div>
+            <strong>{grade.code}</strong>
+            <small>{grade.title}</small>
+          </div>
+          <div className="right-align">
+            <strong>{grade.grade || '—'}</strong>
+            <small>{grade.term}</small>
+          </div>
+        </div>
+      ))}
+    </Card>
+  );
+}
+
+function FinancialPage() {
+  const [bills, setBills] = useState([]);
+
+  useEffect(() => {
+    api('/student/financials').then(setBills).catch(console.error);
+  }, []);
+
+  const current = bills[0] || {};
+
+  return (
+    <Card title="Financials">
+      <div className="stat-grid">
+        <div className="stat-box">
+          <small>Total Tuition</small>
+          <strong>₱{Number(current.total_tuition || 0).toLocaleString()}</strong>
+        </div>
+        <div className="stat-box">
+          <small>Amount Paid</small>
+          <strong>₱{Number(current.paid || 0).toLocaleString()}</strong>
+        </div>
+        <div className="stat-box">
+          <small>Remaining Balance</small>
+          <strong>₱{(Number(current.total_tuition || 0) - Number(current.paid || 0)).toLocaleString()}</strong>
+        </div>
+        <div className="stat-box">
+          <small>Due Date</small>
+          <strong>{current.due_date || '—'}</strong>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function ClearancePage() {
+  const [records, setRecords] = useState([]);
+
+  useEffect(() => {
+    api('/student/clearance').then(setRecords).catch(console.error);
+  }, []);
+
+  return (
+    <Card title="Clearance Tracking">
+      {records.length === 0 ? <p className="muted">No clearance records yet.</p> : records.map((item, index) => (
+        <div key={index} className="list-row">
+          <div>
+            <strong>{item.department}</strong>
+            <small>{item.remarks || 'No remarks yet.'}</small>
+          </div>
+          <div className="right-align">
+            <strong>{item.status}</strong>
+            <small>{item.checked_at || 'Pending'}</small>
+          </div>
+        </div>
+      ))}
+    </Card>
+  );
+}
+
+function IDPage() {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    api('/student/id-card').then(setData).catch(console.error);
+  }, []);
+
+  if (!data) return <div className="loading-screen">Loading digital ID...</div>;
+
+  return (
+    <Card title="Digital ID" className="id-panel">
+      <div className="identity-card">
+        <div className="identity-header">
+          <div className="avatar-circle large">{(data.student?.first_name || 'S')[0]}{(data.student?.last_name || 'T')[0]}</div>
+          <div>
+            <h3>{data.student?.first_name} {data.student?.last_name}</h3>
+            <small>{data.student?.student_no}</small>
+          </div>
+        </div>
+        <div className="identity-meta">
+          <p>{data.student?.program}</p>
+          <p>{data.student?.academic_status || 'Regular'}</p>
+        </div>
+        <div className="qr-box">
+          <QRCodeSVG value={String(data.student?.student_no || 'student-id')} size={110} />
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function AdminDashboard({ user }) {
+  const [stats, setStats] = useState(null);
+  const [students, setStudents] = useState([]);
+
+  useEffect(() => {
+    Promise.all([
+      api('/admin/dashboard'),
+      api('/admin/students')
+    ]).then(([dashboardData, studentData]) => {
+      setStats(dashboardData.stats);
+      setStudents(studentData);
+    }).catch(console.error);
+  }, []);
+
+  if (!stats) return <div className="loading-screen">Loading admin dashboard...</div>;
+
+  return (
+    <>
+      <div className="stat-grid admin-grid">
+        <div className="stat-box"><small>Total Students</small><strong>{stats.students}</strong></div>
+        <div className="stat-box"><small>Enrollments</small><strong>{stats.enrollments}</strong></div>
+        <div className="stat-box"><small>Pending Docs</small><strong>{stats.pendingDocuments}</strong></div>
+        <div className="stat-box"><small>Outstanding</small><strong>₱{Number(stats.outstandingBalance || 0).toLocaleString()}</strong></div>
+      </div>
+
+      <Card title="Student Master List">
+        {students.length === 0 ? <p className="muted">No student records available.</p> : students.slice(0, 8).map((student) => (
+          <div key={student.id} className="list-row">
+            <div>
+              <strong>{student.first_name} {student.last_name}</strong>
+              <small>{student.student_no}</small>
+            </div>
+            <div className="right-align">
+              <strong>{student.program}</strong>
+              <small>{student.email}</small>
+            </div>
+          </div>
+        ))}
+      </Card>
+    </>
+  );
+}
+
+function Card({ title, children, className = '' }) {
+  return (
+    <section className={`panel ${className}`}>
+      <div className="panel-header">
+        <h3>{title}</h3>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<App />);

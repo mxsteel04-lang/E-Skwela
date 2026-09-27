@@ -1,23 +1,50 @@
-import 'dotenv/config';
-import express from 'express'; import cors from 'cors'; import cookieParser from 'cookie-parser'; import crypto from 'node:crypto'; import bcrypt from 'bcryptjs'; import mysql from 'mysql2/promise'; import rateLimit from 'express-rate-limit'; import {z} from 'zod';
-const app=express(); const db=mysql.createPool({host:process.env.DB_HOST,port:Number(process.env.DB_PORT||3306),user:process.env.DB_USER,password:process.env.DB_PASSWORD,database:process.env.DB_NAME,connectionLimit:10});
-app.use(cors({origin:process.env.CLIENT_ORIGIN||'http://localhost:5173',credentials:true})); app.use(express.json({limit:'1mb'})); app.use(cookieParser()); app.use(rateLimit({windowMs:15*60*1000,max:300}));
-const hashToken=t=>crypto.createHash('sha256').update(t).digest('hex'); const auth=async(req,res,next)=>{try{const raw=req.cookies.esk_session;if(!raw)return res.status(401).json({error:'Authentication required'});const [rows]=await db.query('SELECT u.id,u.email,u.role,u.status FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>NOW()',[hashToken(raw)]);if(!rows[0]||rows[0].status!=='ACTIVE')return res.status(401).json({error:'Session expired'});req.user=rows[0];next()}catch(e){next(e)}};
-const roles=(...allowed)=>(req,res,next)=>allowed.includes(req.user.role)?next():res.status(403).json({error:'Forbidden'});
-const audit=(req,action,entity,id)=>db.query('INSERT INTO audit_logs(user_id,action,entity,entity_id,ip) VALUES(?,?,?,?,?)',[req.user?.id,action,entity,id,req.ip]).catch(()=>{});
-app.get('/api/health',(req,res)=>res.json({ok:true}));
-app.post('/api/auth/login',async(req,res,next)=>{try{const data=z.object({email:z.string().email(),password:z.string().min(8)}).parse(req.body);const [rows]=await db.query('SELECT id,email,password_hash,role,status FROM users WHERE email=?',[data.email.toLowerCase()]);if(!rows[0]||rows[0].status!=='ACTIVE'||!(await bcrypt.compare(data.password,rows[0].password_hash)))return res.status(401).json({error:'Invalid credentials'});const raw=crypto.randomBytes(32).toString('hex');await db.query('INSERT INTO sessions VALUES(?,?,DATE_ADD(NOW(),INTERVAL 8 HOUR),NOW())',[hashToken(raw),rows[0].id]);res.cookie('esk_session',raw,{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:8*3600000});await audit({user:rows[0]},'LOGIN','users',rows[0].id);res.json({user:{id:rows[0].id,email:rows[0].email,role:rows[0].role}})}catch(e){next(e)}});
-app.post('/api/auth/logout',auth,async(req,res,next)=>{try{await db.query('DELETE FROM sessions WHERE user_id=?',[req.user.id]);res.clearCookie('esk_session');res.json({ok:true})}catch(e){next(e)}}); app.get('/api/auth/me',auth,(req,res)=>res.json({user:req.user}));
-app.get('/api/dashboard',auth,async(req,res,next)=>{try{if(req.user.role!=='STUDENT')return res.json({role:req.user.role,announcements:(await db.query('SELECT id,title,description,category,published_at FROM announcements ORDER BY published_at DESC LIMIT 8'))[0]});const [[student]]=await db.query('SELECT * FROM students WHERE user_id=?',[req.user.id]);if(!student)return res.status(404).json({error:'Student profile not found'});const [[billing]]=await db.query('SELECT b.*,COALESCE(SUM(CASE WHEN p.status="PAID" THEN p.amount ELSE 0 END),0) paid FROM billing b LEFT JOIN payments p ON p.billing_id=b.id WHERE b.student_id=? GROUP BY b.id ORDER BY b.id DESC LIMIT 1',[student.id]);const [grades]=await db.query('SELECT s.code,s.title,g.grade,g.remarks,t.name term FROM grades g JOIN subjects s ON s.id=g.subject_id JOIN terms t ON t.id=g.term_id WHERE g.student_id=? ORDER BY g.id DESC LIMIT 8',[student.id]);const [schedule]=await db.query('SELECT s.code,s.title,s.units,sc.day_of_week,sc.start_time,sc.end_time,sc.room FROM enrollment_subjects es JOIN enrollments e ON e.id=es.enrollment_id JOIN schedules sc ON sc.id=es.schedule_id JOIN subjects s ON s.id=sc.subject_id WHERE e.student_id=? AND e.status IN ("APPROVED","ENROLLED") ORDER BY sc.day_of_week,sc.start_time',[student.id]);const [docs]=await db.query('SELECT request_no,document_type,status,requested_at FROM document_requests WHERE student_id=? ORDER BY requested_at DESC LIMIT 5',[student.id]);const [announcements]=await db.query('SELECT id,title,description,category,published_at FROM announcements ORDER BY published_at DESC LIMIT 5');res.json({student,billing,grades,schedule,documents:docs,announcements})}catch(e){next(e)}});
-app.get('/api/profile',auth,async(req,res,next)=>{try{const [rows]=await db.query('SELECT s.* ,u.email FROM students s JOIN users u ON u.id=s.user_id WHERE s.user_id=?',[req.user.id]);res.json(rows[0]||null)}catch(e){next(e)}});
-app.patch('/api/profile',auth,async(req,res,next)=>{try{if(req.user.role!=='STUDENT')return res.status(403).json({error:'Forbidden'});const data=z.object({phone:z.string().max(40).optional(),address:z.string().max(1000).optional(),photo_url:z.string().url().max(500).optional()}).parse(req.body);const [student]=await db.query('SELECT id FROM students WHERE user_id=?',[req.user.id]);if(!student[0])return res.status(404).json({error:'Profile not found'});await db.query('UPDATE students SET phone=COALESCE(?,phone),address=COALESCE(?,address),photo_url=COALESCE(?,photo_url) WHERE id=?',[data.phone,data.address,data.photo_url,student[0].id]);res.json({ok:true})}catch(e){next(e)}});
-app.get('/api/enrollment/options',auth,async(req,res,next)=>{try{const [terms]=await db.query('SELECT * FROM terms ORDER BY start_date DESC');const [subjects]=await db.query('SELECT sc.id schedule_id,s.code,s.title,s.units,sc.day_of_week,sc.start_time,sc.end_time,sc.room FROM schedules sc JOIN subjects s ON s.id=sc.subject_id');res.json({terms,subjects})}catch(e){next(e)}});
-app.post('/api/enrollment',auth,async(req,res,next)=>{try{const [student]=await db.query('SELECT id FROM students WHERE user_id=?',[req.user.id]);if(!student[0])return res.status(404).json({error:'Student profile not found'});const data=z.object({term_id:z.coerce.number(),schedule_ids:z.array(z.coerce.number()).min(1)}).parse(req.body);const conn=await db.getConnection();try{await conn.beginTransaction();const [existing]=await conn.query('SELECT id FROM enrollments WHERE student_id=? AND term_id=? AND status IN ("PENDING","APPROVED","ENROLLED")',[student[0].id,data.term_id]);if(existing[0])throw Object.assign(new Error('An active enrollment already exists'),{status:409});const [r]=await conn.query('INSERT INTO enrollments(student_id,term_id,status,submitted_at) VALUES(?,?,"PENDING",NOW())',[student[0].id,data.term_id]);for(const id of data.schedule_ids)await conn.query('INSERT INTO enrollment_subjects VALUES(?,?)',[r.insertId,id]);await conn.commit();res.status(201).json({id:r.insertId,status:'PENDING'})}catch(e){await conn.rollback();throw e}finally{conn.release()}}catch(e){next(e)}});
-app.get('/api/documents',auth,async(req,res,next)=>{try{const [s]=await db.query('SELECT id FROM students WHERE user_id=?',[req.user.id]);const [rows]=await db.query('SELECT * FROM document_requests WHERE student_id=? ORDER BY requested_at DESC',[s[0]?.id||0]);res.json(rows)}catch(e){next(e)}});
-app.post('/api/documents',auth,async(req,res,next)=>{try{const [s]=await db.query('SELECT id FROM students WHERE user_id=?',[req.user.id]);const data=z.object({document_type:z.string().min(3).max(120)}).parse(req.body);const no=`DOC-${Date.now()}-${crypto.randomInt(100,999)}`;const [r]=await db.query('INSERT INTO document_requests(student_id,request_no,document_type) VALUES(?,?,?)',[s[0].id,no,data.document_type]);res.status(201).json({id:r.insertId,request_no:no,status:'PENDING'})}catch(e){next(e)}});
-app.get('/api/admin/students',auth,roles('ADMIN','SUPER_ADMIN'),async(req,res,next)=>{try{const q=String(req.query.search||'');const [rows]=await db.query('SELECT s.*,u.email,u.status FROM students s JOIN users u ON u.id=s.user_id WHERE s.student_no LIKE ? OR CONCAT(s.first_name," ",s.last_name) LIKE ? ORDER BY s.last_name LIMIT 100',[`%${q}%`,`%${q}%`]);res.json(rows)}catch(e){next(e)}});
-app.get('/api/admin/enrollments',auth,roles('ADMIN','SUPER_ADMIN'),async(req,res,next)=>{try{const [rows]=await db.query('SELECT e.*,s.student_no,CONCAT(s.first_name," ",s.last_name) student_name,t.name term FROM enrollments e JOIN students s ON s.id=e.student_id JOIN terms t ON t.id=e.term_id ORDER BY e.submitted_at DESC');res.json(rows)}catch(e){next(e)}});
-app.patch('/api/admin/enrollments/:id',auth,roles('ADMIN','SUPER_ADMIN'),async(req,res,next)=>{try{const status=z.enum(['APPROVED','REJECTED','ENROLLED']).parse(req.body.status);await db.query('UPDATE enrollments SET status=?,reviewed_at=NOW(),remarks=? WHERE id=?',[status,req.body.remarks||null,req.params.id]);await audit(req,'UPDATE','enrollments',req.params.id);res.json({ok:true})}catch(e){next(e)}});
-app.get('/api/announcements',auth,async(req,res,next)=>{try{const [rows]=await db.query('SELECT id,title,description,category,published_at FROM announcements ORDER BY published_at DESC');res.json(rows)}catch(e){next(e)}});
-app.use((err,req,res,next)=>{console.error(err);res.status(err.status||400).json({error:err.name==='ZodError'?'Invalid request data':err.message||'Server error'})});
-app.listen(Number(process.env.PORT||4000),()=>console.log(`E-Skwela API listening on ${process.env.PORT||4000}`));
+import express from 'express';
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import rateLimit from 'express-rate-limit';
+import dotenv from 'dotenv';
+import pool from './db.js';
+import { authRequired, authorize } from './middleware.js';
+import authRoutes from './routes/auth.js';
+import studentRoutes from './routes/student.js';
+import adminRoutes from './routes/admin.js';
+
+dotenv.config();
+
+const app = express();
+
+app.use(cors({
+  origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173',
+  credentials: true
+}));
+app.use(express.json({ limit: '1mb' }));
+app.use(cookieParser());
+
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  message: { error: 'Too many requests. Please try again later.' }
+}));
+
+app.get('/api/health', async (_req, res) => {
+  try {
+    await pool.query('SELECT 1');
+    res.json({ ok: true, status: 'UP' });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: 'Database unavailable' });
+  }
+});
+
+app.use('/api/auth', authRoutes);
+app.use('/api/student', authRequired, studentRoutes);
+app.use('/api/admin', authRequired, authorize('ADMIN', 'SUPER_ADMIN'), adminRoutes);
+
+app.use((err, _req, res, _next) => {
+  console.error(err);
+  res.status(500).json({ error: err.message || 'Server error' });
+});
+
+const PORT = Number(process.env.PORT || 4000);
+app.listen(PORT, () => {
+  console.log(`E-Skwela API running on port ${PORT}`);
+});

@@ -1,5 +1,169 @@
-{
-  "name":"eskewela-api","private":true,"type":"module",
-  "scripts":{"dev":"node --watch src/index.js","start":"node src/index.js","db:setup":"node src/setup.js"},
-  "dependencies":{"bcryptjs":"^2.4.3","cookie-parser":"^1.4.7","cors":"^2.8.5","dotenv":"^16.4.5","express":"^4.21.1","express-rate-limit":"^7.4.1","mysql2":"^3.11.3","zod":"^3.23.8"}
-}
+import express from 'express';
+import { z } from 'zod';
+import pool from '../db.js';
+
+const router = express.Router();
+
+router.get('/dashboard', async (_req, res, next) => {
+  try {
+    const [studentCount] = await pool.query('SELECT COUNT(*) AS total FROM students');
+    const [enrollmentCount] = await pool.query('SELECT COUNT(*) AS total FROM enrollments');
+    const [pendingDocs] = await pool.query('SELECT COUNT(*) AS total FROM document_requests WHERE status IN ("PENDING", "PROCESSING")');
+    const [outstanding] = await pool.query(
+      `SELECT COALESCE(SUM(b.total_tuition + b.other_fees - b.discounts - COALESCE((SELECT SUM(p.amount) FROM payments p WHERE p.billing_id = b.id AND p.status = 'PAID'), 0)), 0) AS total
+       FROM billing b`
+    );
+
+    res.json({
+      stats: {
+        students: studentCount[0].total,
+        enrollments: enrollmentCount[0].total,
+        pendingDocuments: pendingDocs[0].total,
+        outstandingBalance: outstanding[0].total
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/students', async (req, res, next) => {
+  try {
+    const search = `%${String(req.query.search || '')}%`;
+    const [rows] = await pool.query(
+      `SELECT s.*, u.email, u.status
+       FROM students s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.student_no LIKE ? OR CONCAT(s.first_name, ' ', s.last_name) LIKE ?
+       ORDER BY s.last_name, s.first_name
+       LIMIT 100`,
+      [search, search]
+    );
+    res.json(rows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/students', async (req, res, next) => {
+  try {
+    const schema = z.object({
+      email: z.string().email(),
+      password: z.string().min(8),
+      student_no: z.string().min(3),
+      first_name: z.string().min(1),
+      last_name: z.string().min(1),
+      program: z.string().min(1),
+      year_level: z.string().min(1)
+    });
+
+    const payload = schema.parse(req.body);
+    const bcrypt = await import('bcryptjs');
+    const passwordHash = await bcrypt.default.hash(payload.password, 12);
+
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      const [userResult] = await connection.query(
+        'INSERT INTO users (email, password_hash, role, status) VALUES (?, ?, "STUDENT", "ACTIVE")',
+        [payload.email.toLowerCase(), passwordHash]
+      );
+
+      await connection.query(
+        `INSERT INTO students (user_id, student_no, first_name, last_name, program, year_level)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [userResult.insertId, payload.student_no, payload.first_name, payload.last_name, payload.program, payload.year_level]
+      );
+
+      await connection.commit();
+      res.status(201).json({ ok: true });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/enrollments', async (_req, res, next) => {
+  try {
+    const [rows] = await pool.query(
+      `SELECT e.id, e.status, e.submitted_at, t.name AS term,
+              CONCAT(s.first_name, ' ', s.last_name) AS student_name, s.student_no
+       FROM enrollments e
+       JOIN students s ON s.id = e.student_id
+       JOIN terms t ON t.id = e.term_id
+       ORDER BY e.submitted_at DESC`
+    );
+    res.json(rows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.patch('/enrollments/:id', async (req, res, next) => {
+  try {
+    const schema = z.object({
+      status: z.enum(['APPROVED', 'REJECTED', 'ENROLLED']),
+      remarks: z.string().max(1000).optional()
+    });
+
+    const payload = schema.parse(req.body);
+    await pool.query(
+      'UPDATE enrollments SET status = ?, reviewed_at = NOW(), remarks = ? WHERE id = ?',
+      [payload.status, payload.remarks || null, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/announcements', async (_req, res, next) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT a.*, u.email AS author_email FROM announcements a JOIN users u ON u.id = a.author_id ORDER BY a.published_at DESC'
+    );
+    res.json(rows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/announcements', async (req, res, next) => {
+  try {
+    const schema = z.object({
+      title: z.string().min(3),
+      description: z.string().min(10),
+      category: z.string().optional(),
+      author_id: z.coerce.number()
+    });
+
+    const payload = schema.parse(req.body);
+    const [result] = await pool.query(
+      'INSERT INTO announcements (title, description, author_id, category, published_at) VALUES (?, ?, ?, ?, NOW())',
+      [payload.title, payload.description, payload.author_id, payload.category || 'University Update']
+    );
+
+    res.status(201).json({ id: result.insertId });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/reports', async (_req, res, next) => {
+  try {
+    const [students] = await pool.query(
+      `SELECT student_no, CONCAT(first_name, ' ', last_name) AS full_name, program, year_level
+       FROM students ORDER BY last_name`
+    );
+    res.json({ students });
+  } catch (error) {
+    next(error);
+  }
+});
+
+export default router;
